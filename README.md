@@ -10,13 +10,15 @@
   <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react" alt="React 19">
   <img src="https://img.shields.io/badge/Tests-131%20passed-success?logo=pytest" alt="131 tests">
   <img src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker" alt="Docker">
+  <img src="https://img.shields.io/badge/Prometheus-metrics-E6522C?logo=prometheus" alt="Prometheus">
+  <img src="https://img.shields.io/badge/Grafana-dashboards-F46800?logo=grafana" alt="Grafana">
 </p>
 
 <br>
 
 # 🔍 智能搜索助手 — 实时联网搜索 Agent 系统
 
-基于 **LangGraph** + **Tavily API** + **FastAPI** + **Next.js 16** + **Streamlit** 构建的实时联网搜索 Agent。
+基于 **LangGraph** + **Tavily API** + **FastAPI** + **Next.js 16** 构建的实时联网搜索 Agent。支持 OpenAI 兼容的 LLM（包括阿里云百炼 DashScope / 通义千问）。
 
 ## ✨ 核心特性
 
@@ -28,14 +30,15 @@
 - **多轮对话**: 基于会话 ID 的上下文缓存，跨轮意图连贯
 - **限流保护**: 搜索 API 配额管理与滑动窗口限流
 - **连接池复用**: 全局共享 httpx 客户端，消除 TCP/TLS 握手开销
+- **可观测性栈**: Prometheus 指标采集 + Grafana 可视化仪表盘 + 告警规则
 - **双前端**: Next.js 16 生产前端 + Streamlit 开发调试面板
 
 ## 🏗️ 架构
 
 ```
 ┌──────────────────┐     SSE Stream       ┌──────────────┐       HTTP         ┌────────────────┐
-│ Next.js 16 前端   │ ◄─────────────────── │  FastAPI 后端  │ ──────────────────► │ LLM API (OpenAI │
-│ (port 3001)       │   event: progress    │  (port 8000)   │   streaming POST   │  compatible)    │
+│ Next.js 16 前端   │ ◄─────────────────── │  FastAPI 后端  │ ──────────────────► │ LLM API        │
+│ (port 3001)       │   event: progress    │  (port 8000)   │   streaming POST   │ (OpenAI 兼容)   │
 │                   │   event: token       │               │                    │                │
 │ React 19 + TS     │   event: sources     │  LangGraph     │ ──────────────────► │ Tavily Search   │
 │ Tailwind CSS 4    │   event: done        │  Agent Pipeline│   Search API       │ API             │
@@ -44,7 +47,15 @@
 │ Streamlit 面板    │                       │ 全局 httpx     │
 │ (port 8501)       │                       │ 连接池复用     │
 │ 开发调试用         │                       │               │
-└──────────────────┘                       └───────────────┘
+└──────────────────┘                       ├───────────────┤
+                                           │ /api/metrics   │ ◄── Prometheus 抓取 (每 15s)
+                                           │ Prometheus 指标 │
+┌──────────────────┐                       └───────────────┘
+│ Grafana 仪表盘    │ ◄─── PromQL ──── ┌──────────────────┐
+│ (port 3002)       │                  │ Prometheus        │
+│ 可用性 SLA 监控   │                  │ (port 9090)       │
+└──────────────────┘                  │ 抓取 + 告警        │
+                                      └──────────────────┘
 ```
 
 ### Agent 工作流
@@ -53,9 +64,9 @@
 ┌──────────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
 │  用户输入     │ ──→ │ 查询改写  │ ──→ │ 并行搜索  │ ──→ │ 答案生成  │
 └──────────────┘     └──────────┘     └──────────┘     └──────────┘
-                                           │                  │
-                                     子查询并行            错误恢复
-                                     跳过LLM打分           (降级回答)
+                           │                │                │
+                     意图识别 +          子查询并行          错误恢复
+                     子查询拆分           跳过LLM打分        (降级回答)
 ```
 
 ## 📁 项目结构
@@ -66,7 +77,7 @@ qa/
 │   ├── __init__.py                 # 模块入口
 │   ├── graph.py                    # LangGraph 状态图 (核心编排)
 │   ├── models.py                   # Pydantic 数据模型 + AgentState TypedDict
-│   └── streaming.py                # SSE 流式编排器
+│   └── streaming.py                # SSE 流式编排器 (生产者-消费者模式)
 ├── tools/                          # 工具注册中心
 │   ├── __init__.py                 # 工具模块
 │   └── registry.py                 # 4 个工具: 搜索/改写/打分/降级 + 组合流水线
@@ -75,8 +86,19 @@ qa/
 │   └── session_store.py            # 会话缓存 (TTL 过期)
 ├── utils/                          # 工具函数
 │   ├── __init__.py                 # 工具函数模块
-│   ├── helpers.py                  # URL 去重, Token 计数, 限流, 裁剪
-│   └── http_client.py              # 全局共享 HTTP 客户端 (连接池复用)
+│   ├── helpers.py                  # URL 去重, Token 计数, 限流, 上下文裁剪
+│   ├── http_client.py              # 全局共享 HTTP 客户端 (连接池复用)
+│   └── metrics.py                  # Prometheus 指标 + 滑动窗口可用性统计 (95% SLA)
+├── monitoring/                     # 可观测性栈
+│   ├── prometheus/
+│   │   ├── prometheus.yml          # Prometheus 配置 (15s 抓取间隔)
+│   │   └── alerts.yml              # 告警规则 (高错误率/高延迟/服务宕机)
+│   └── grafana/
+│       ├── dashboards/
+│       │   ├── availability.json   # 可用性监控 Dashboard (4 区域 11 面板)
+│       │   └── dashboard.yml       # Dashboard 自动加载配置
+│       └── datasources/
+│           └── prometheus.yml      # Prometheus 数据源
 ├── tests/                          # 测试 (131 条)
 │   ├── __init__.py                 # 测试包
 │   ├── test_core.py                # 单元测试 (去重/Token/限流/会话/模型)
@@ -115,7 +137,7 @@ qa/
 │   │   └── providers/
 │   │       └── ChatProvider.tsx      # 聊天状态管理 (React Context)
 │   ├── next.config.ts               # Next.js 配置 (rewrites 代理 + standalone 输出)
-│   ├── package.json                 # 依赖: Next.js 16, React 19, Tailwind CSS 4
+│   ├── package.json                 # 依赖: Next.js 16.2, React 19.2, Tailwind CSS 4
 │   └── tsconfig.json                # TypeScript 配置
 ├── server.py                       # FastAPI 后端入口 (SSE + REST API + 生命周期管理)
 ├── app.py                           # Streamlit 开发调试面板
@@ -137,73 +159,91 @@ qa/
 确保已安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/) 或 Docker Engine 20.10+。
 
 ```bash
-# 1. 克隆项目后，先配置 API 密钥
-# 编辑 .env，填入真实的 API Key
-# LLM_API_KEY=sk-your-real-key
+# 1. 配置 API 密钥
+# 编辑 .env，填入真实的 API Key。
+
+# ── LLM 配置 (OpenAI 兼容协议) ──
+# 阿里云百炼 DashScope (通义千问):
+#   LLM_API_KEY=sk-xxxxxxxxxxxxxxxxxx
+#   LLM_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
+#   LLM_MODEL=qwen3.7-plus
+#
+# OpenAI / 其他兼容 API:
+#   LLM_API_KEY=sk-your-openai-key
+#   LLM_API_BASE=https://api.openai.com/v1
+#   LLM_MODEL=gpt-4o-mini
+#
+# ── Tavily 搜索 API ──
 # TAVILY_API_KEY=tvly-your-real-key
 
-# 2. 构建镜像并启动所有服务（首次需要几分钟构建）
+# 2. 构建并启动所有服务
 docker compose up -d --build
 
-# 3. 查看运行状态，确认两个服务都是 healthy
+# 3. 查看运行状态，确认所有服务 healthy
 docker compose ps
-
-# 4. 打开浏览器
-# 前端界面: http://localhost:3001
-# FastAPI 文档 (Swagger): http://localhost:8000/docs
-# 健康检查: http://localhost:8000/api/health
-
-# 5. 查看实时日志
-docker compose logs -f backend    # 后端日志
-docker compose logs -f frontend   # 前端日志
-
-# 6. 停止服务
-docker compose down
 ```
 
-**Windows 用户**: 如果遇到 Docker Desktop gRPC 问题，可以直接运行一键脚本：
+启动后可访问以下地址：
 
-```powershell
-.\fix-and-start.ps1
-```
-
-**关于 `docker compose up -d`**：
-- `-d` 表示后台运行（daemon），不加 `-d` 可以在终端直接看到日志
-- `--build` 表示每次启动前重新构建镜像，确保代码更新生效
+| 服务 | 地址 | 说明 |
+|------|------|------|
+| 前端界面 | http://localhost:3001 | Next.js 16 生产模式 |
+| FastAPI 文档 | http://localhost:8000/docs | Swagger UI |
+| 健康检查 | http://localhost:8000/api/health | `{"status":"ok"}` |
+| Prometheus 指标 | http://localhost:8000/api/metrics | 文本格式 (Prometheus 抓取) |
+| Prometheus UI | http://localhost:9090 | 指标查询 + 告警状态 |
+| Grafana 仪表盘 | http://localhost:3002 | 登录 admin/admin → 可用性监控面板 |
 
 **容器端口映射**：
 
-| 服务 | 容器内端口 | 宿主机端口 | 说明 |
-|------|-----------|-----------|------|
+| 服务 | 容器内 | 宿主机 | 说明 |
+|------|--------|--------|------|
 | `search-backend` | 8000 | 8000 | FastAPI + uvicorn，SSE 流式聊天 |
 | `search-frontend` | 3000 | 3001 | Next.js 16 生产模式 (standalone) |
+| `search-prometheus` | 9090 | 9090 | 指标存储与查询 |
+| `search-grafana` | 3000 | 3002 | 可视化仪表盘 (admin/admin) |
 
-**常见问题排查**：
+**常用操作**：
 
 ```bash
-# 如果前端无法访问后端 API，检查后端是否启动
-docker compose logs backend --tail 20
+# 查看日志
+docker compose logs -f backend          # 后端实时日志
+docker compose logs -f frontend         # 前端实时日志
+docker compose logs --tail=50 backend   # 后端最近 50 行
 
-# 如果需要完全重建（清除缓存）
+# 重启单个服务
+docker compose restart backend
+
+# 停止所有服务
+docker compose down
+
+# 完全重建（代码修改后）
 docker compose down
 docker compose build --no-cache
 docker compose up -d
 
-# 如果 .env 修改后不生效
-docker compose down && docker compose up -d --build
+# 进入容器调试
+docker exec -it search-backend bash
+docker exec -it search-frontend sh
 ```
 
-**镜像文件说明**：
+**镜像说明**：
 
 | 文件 | 基础镜像 | 用途 |
 |------|---------|------|
 | `Dockerfile.backend` | `python:3.12-slim` | 安装 pip 依赖 → 启动 uvicorn |
 | `Dockerfile.frontend` | 多阶段 `node:22-alpine` | `npm build` → 生产 runner 启动 `next start` |
-| `docker-compose.yml` | — | 两服务编排 + 内部 bridge 网络 + 健康检查 |
+| `docker-compose.yml` | — | 4 服务编排 + bridge 网络 + 健康检查 |
+
+> **Windows 用户**: 如遇到 Docker Desktop gRPC 问题，可直接运行：
+> ```powershell
+> .\fix-and-start.ps1
+> ```
+> 该脚本自动检测 Docker 状态、清理旧资源、禁用 BuildKit 并启动服务。
 
 ### 方式二: 本地开发
 
-#### 1. 安装 Python 依赖
+#### 1. 安装依赖
 
 ```bash
 pip install -r requirements.txt
@@ -211,13 +251,24 @@ pip install -r requirements.txt
 
 #### 2. 配置 API 密钥
 
-在 `.env` 文件中填入 API Key：
+在 `.env` 文件中填入 API Key。本项目使用 **OpenAI 兼容协议**，支持：
+
+| LLM 提供商 | LLM_API_BASE |
+|------------|-------------|
+| 阿里云百炼 DashScope (通义千问) | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| OpenAI | `https://api.openai.com/v1` |
+| 其他兼容代理 (如 OneAPI, LiteLLM) | 自定 |
 
 ```bash
-# LLM_API_KEY=sk-xxx
-# TAVILY_API_KEY=tvly-xxx
-# LLM_API_BASE=https://api.openai.com/v1   (可选，默认值)
-# LLM_MODEL=gpt-4o-mini                      (可选)
+# 必填
+LLM_API_KEY=sk-xxx
+TAVILY_API_KEY=tvly-xxx
+
+# 可选 (以下为默认值)
+LLM_API_BASE=https://api.openai.com/v1
+LLM_MODEL=gpt-4o-mini
+LLM_TEMPERATURE=0.3
+TAVILY_API_BASE=https://api.tavily.com
 ```
 
 #### 3. 启动后端
@@ -229,10 +280,6 @@ uvicorn server:app --reload --port 8000
 # 或直接运行
 python server.py
 ```
-
-服务启动后可访问：
-- API 文档 (Swagger): http://localhost:8000/docs
-- 健康检查: http://localhost:8000/api/health
 
 #### 4. 启动前端 (二选一)
 
@@ -274,6 +321,100 @@ python -m evals.benchmark                    # 延迟 & Token 对比摘要
 python -m evals.benchmark --html             # 生成 HTML 基准报告
 python -m evals.benchmark --json             # 输出 JSON 格式
 ```
+
+## 📡 API 端点
+
+| 端点 | 方法 | 描述 |
+|------|------|------|
+| `/api/chat/stream` | POST | SSE 流式聊天 (query, session_id, model, search_depth, top_k) |
+| `/api/session/{id}` | GET | 获取会话历史 |
+| `/api/session/{id}` | DELETE | 清除会话 |
+| `/api/config/defaults` | GET | 获取默认配置 (model, search_depth, top_k, llm_api_base) |
+| `/api/health` | GET | 健康检查 (status, active_sessions) |
+| `/api/metrics` | GET | Prometheus 文本格式指标 |
+| `/api/metrics?format=json` | GET | JSON 格式完整统计 (含可用性 + 指标快照) |
+| `/api/metrics?format=availability` | GET | JSON 格式可用性统计 (仅 SLA) |
+
+### SSE 事件类型
+
+```
+event: progress  → {"node":"rewrite|search|generate|fallback|score","message":"..."}
+event: token     → {"text":"逐token文本"}
+event: sources   → {"sources":[{url,title,snippet}]}
+event: done      → {confidence,latency_ms,tokens_used,is_fallback}
+event: error     → {message,code}
+```
+
+## 📊 可观测性 (Prometheus + Grafana)
+
+项目内置完整的可观测性栈，提供指标采集、可视化仪表盘和告警通知。
+
+### 指标概览
+
+`utils/metrics.py` 通过独立 Prometheus Registry 采集以下指标：
+
+| 指标名 | 类型 | 标签 | 说明 |
+|--------|------|------|------|
+| `http_requests_total` | Counter | method, path, status_code | HTTP 请求计数 |
+| `http_request_duration_seconds` | Histogram | method, path | 请求延迟分布 |
+| `sse_streams_total` | Counter | status | SSE 流连接 (started/completed/disconnected) |
+| `search_requests_total` | Counter | provider, status | 搜索 API 调用 (success/error/timeout) |
+| `tokens_consumed_total` | Counter | type | Token 消耗 (input/output) |
+| `active_sessions` | Gauge | — | 活跃会话数 |
+| `search_duration_seconds` | Histogram | provider | 搜索调用延迟 |
+| `llm_call_duration_seconds` | Histogram | operation | LLM 调用延迟 (rewrite/score/generate/fallback) |
+| `errors_total` | Counter | type | 错误事件 (search_failure/llm_error/timeout/fallback_triggered) |
+| `http_availability_ratio` | Gauge | window | 滑动窗口可用性比率 (1m/5m/15m/1h) |
+| `http_sla_violation` | Gauge | window | SLA 违规标记 (1=低于 95%) |
+
+### 滑动窗口可用性统计
+
+`AvailabilityTracker` 按秒级粒度追踪每次请求的成功/失败状态，支持多窗口查询：
+
+```python
+from utils.metrics import get_availability_tracker
+
+tracker = get_availability_tracker()
+print(tracker.availability_ratio(300))  # 5 分钟窗口
+print(tracker.meets_sla(0.95))           # True/False
+print(tracker.stats)                     # {"1m": {...}, "5m": {...}, "15m": {...}, "1h": {...}}
+```
+
+### Grafana 仪表盘
+
+Dashboard 包含 4 个区域、11 个面板：
+
+| 区域 | 面板 | 说明 |
+|------|------|------|
+| **可用性概览** | 可用性 Gauge / SLA 违规 / 请求速率 | 实时 95% SLA 状态 |
+| **延迟 & 性能** | HTTP P50/P95/P99 / 搜索 P50/P95 | 端到端延迟趋势 |
+| **请求 & 错误** | 状态码堆叠 / 错误速率 | 异常定位 |
+| **Agent 工作负载** | 活跃会话 / Token 速率 / SSE 连接 / 搜索速率 | 吞吐量监控 |
+
+### 告警规则
+
+`monitoring/prometheus/alerts.yml` 定义了 5 条告警：
+
+| 告警 | 严重级别 | 触发条件 |
+|------|---------|----------|
+| HighErrorRate | critical | 5xx 错误率 > 5%，持续 5 分钟 |
+| HighLatency | warning | P95 延迟 > 10s，持续 5 分钟 |
+| ServiceDown | critical | 后端无响应，持续 1 分钟 |
+| HighSearchFailureRate | warning | 搜索 API 失败率 > 10%，持续 5 分钟 |
+| HighTokenConsumption | info | Token 消耗 > 100k/s，持续 10 分钟 |
+
+## 🔧 工具注册
+
+项目遵循**职责单一原则**注册 4 个工具：
+
+| 工具 | 类别 | 职责 |
+|------|------|------|
+| `tavily_search` | 搜索 | Tavily API 实时联网搜索，使用 `get_http_client` 连接池复用 |
+| `query_rewriter` | 改写 | LLM 口语化→精准查询词，支持子查询拆分 + 意图识别 |
+| `relevance_scorer` | 打分 | LLM 0-1 相关性评分 (默认关闭，使用 Tavily 原始分数) |
+| `fallback_answer` | 降级 | 搜索不可用时 LLM 知识回答，带 ⚠️ 标记 |
+
+另有组合工具 `search_and_filter_pipeline()` 串联搜索→去重→(可选)打分→裁剪完整流水线。
 
 ## 🧪 测试分层
 
@@ -338,39 +479,6 @@ python -m evals.benchmark --json             # 输出 JSON 格式
 | `state_integrity` | 2 | 状态完整性 (AgentState 键/GeneratedAnswer 字段) |
 | `edge_case` | 5 | 边缘情况 (空查询/单字符/全角/超长/中文) |
 
-## 🔧 工具注册
-
-项目遵循**职责单一原则**注册 4 个工具：
-
-| 工具 | 类别 | 职责 |
-|------|------|------|
-| `tavily_search` | 搜索 | Tavily API 实时联网搜索，使用 `get_http_client` 连接池复用 |
-| `query_rewriter` | 改写 | LLM 口语化→精准查询词，支持子查询拆分 + 意图识别 |
-| `relevance_scorer` | 打分 | LLM 0-1 相关性评分 (默认关闭，使用 Tavily 原始分数) |
-| `fallback_answer` | 降级 | 搜索不可用时 LLM 知识回答，带 ⚠️ 标记 |
-
-另有组合工具 `search_and_filter_pipeline()` 串联搜索→去重→(可选)打分→裁剪完整流水线。
-
-## 📡 API 端点
-
-| 端点 | 方法 | 描述 |
-|------|------|------|
-| `/api/chat/stream` | POST | SSE 流式聊天 (query, session_id, model, search_depth, top_k) |
-| `/api/session/{id}` | GET | 获取会话历史 |
-| `/api/session/{id}` | DELETE | 清除会话 |
-| `/api/config/defaults` | GET | 获取默认配置 (model, search_depth, top_k, llm_api_base) |
-| `/api/health` | GET | 健康检查 (status, active_sessions) |
-
-### SSE 事件类型
-
-```
-event: progress  → {"node":"rewrite|search|generate|fallback|score","message":"..."}
-event: token     → {"text":"逐token文本"}
-event: sources   → {"sources":[{url,title,snippet}]}
-event: done      → {confidence,latency_ms,tokens_used,is_fallback}
-event: error     → {message,code}
-```
-
 ## 🛡️ 容错机制
 
 | 故障类型 | 恢复策略 |
@@ -381,70 +489,10 @@ event: error     → {message,code}
 | LLM API 故障 | 友好错误提示 + 二次降级 |
 | 配额耗尽 | 滑动窗口限流，提前拦截 |
 
-## 🐳 Docker 部署详解
-
-### 前置要求
-
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows/Mac) 或 Docker Engine 20.10+ (Linux)
-- 确保 `docker compose` 命令可用：`docker compose version`
-
-### 完整部署流程
-
-```bash
-# 1. 配置 API 密钥
-# 编辑 .env 文件并填入真实的 API Key
-# LLM_API_KEY=sk-your-real-key
-# TAVILY_API_KEY=tvly-your-real-key
-
-# 2. 构建并启动
-docker compose up -d --build
-
-# 3. 等待健康检查通过
-docker compose ps
-# 预期输出：两个服务 State 列都显示 Up (healthy)
-```
-
-### 常用操作
-
-```bash
-# 查看日志
-docker compose logs -f backend          # 后端实时日志
-docker compose logs -f frontend         # 前端实时日志
-docker compose logs --tail=50 backend   # 后端最近 50 行
-
-# 重启单个服务
-docker compose restart backend
-docker compose restart frontend
-
-# 停止所有服务
-docker compose down
-
-# 完全重建（修改代码或 Dockerfile 后）
-docker compose down
-docker compose build --no-cache
-docker compose up -d
-
-# 进入容器调试
-docker exec -it search-backend bash     # 后端的 bash
-docker exec -it search-frontend sh      # 前端的 shell (alpine 无 bash)
-```
-
-### 健康检查验证
-
-```bash
-# 验证后端
-curl http://localhost:8000/api/health
-# → {"status":"ok","active_sessions":0}
-
-# 验证前端
-curl -I http://localhost:3001
-# → HTTP/1.1 200 OK
-```
-
 ## 📈 效果指标
 
 - 正常期可用性: **≈100%**
-- 异常期可用性: **95%+**
+- 异常期可用性: **95%+** (Grafana 实时监控)
 - LLM 调用减少: 5次 → 2次 (省 60%)
 - Prompt Token 节省: **95.7%** (13,397 → 572 tokens/轮)
 - 首 Token 延迟: 子查询并行 + 无打分等待，预计降低 **50%+**
